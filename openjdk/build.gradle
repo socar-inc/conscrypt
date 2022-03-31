@@ -1,5 +1,5 @@
 plugins {
-    id 'com.github.johnrengelman.shadow' version '6.0.0'
+    id 'com.github.johnrengelman.shadow' version '6.1.0'
 }
 
 import aQute.bnd.gradle.BundleTaskConvention
@@ -31,6 +31,12 @@ enum NativeBuildInfo {
 
     public final String os;
     public final String arch;
+    private static final archAliases = [
+            "arm64": "aarch64",
+            "amd64": "x86_64",
+            "i686": "x86_64",
+            "i386": "x86"
+    ]
 
     NativeBuildInfo(String os, String arch) {
         this.os = os;
@@ -65,7 +71,14 @@ enum NativeBuildInfo {
         }
     }
 
+    boolean is64bit() {
+        true
+    }
+
     static NativeBuildInfo find(String os, String arch) {
+        if (archAliases.containsKey(arch)) {
+            arch = archAliases[arch]
+        }
         values().find {
             it.os == os && it.arch == arch
         }
