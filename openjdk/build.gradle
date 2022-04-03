@@ -29,6 +29,8 @@ enum NativeBuildInfo {
         }
     };
 
+    static String buildDir = "FIXME"
+
     public final String os;
     public final String arch;
     private static final archAliases = [
@@ -47,14 +49,8 @@ enum NativeBuildInfo {
         "${os}-${arch}"
     }
 
-    String sourceSetName() {
-        classifier().replaceAll("-", "_")
-    }
-
-    String nativeResourcesDir(File base) {
-        String basePath = base.getPath()
-        String sourceSetName = sourceSetName()
-        "${basePath}/${sourceSetName}/native-resources"
+    String nativeResourcesDir() {
+        "$buildDir/${classifier()}/native-resources"
     }
 
     // Target platform as detected by Gradle
@@ -90,6 +86,16 @@ enum NativeBuildInfo {
         }
     }
 }
+// XXX There has to be a better way of accessing Gradle properties from Groovy than this
+NativeBuildInfo.buildDir = "$buildDir"
+
+static buildInfo(nativeBuild) {
+    def targetOS = nativeBuild.operatingSystem.name
+    def targetArch = nativeBuild.architecture.name.replaceAll("-", "_") // XXX
+    def result = NativeBuildInfo.find(targetOS, targetArch)
+    assert result != null : "Unknown target platform"
+    result
+}
 
 ext {
     jniSourceDir = "$rootDir/common/src/jni"
@@ -103,8 +109,8 @@ ext {
     assert buildToTest != null : "No test build selected"
 
     // Compatibility with other sub-projects
-    preferredSourceSet = buildToTest.sourceSetName()
-    preferredNativeFileDir = buildToTest.nativeResourcesDir(buildDir)
+    preferredSourceSet = buildToTest.classifier()
+    preferredNativeFileDir = buildToTest.nativeResourcesDir()
 }
 
 sourceSets {
@@ -134,14 +140,14 @@ sourceSets {
             srcDirs += "${rootDir}/common/src/test/resources"
             // This shouldn't be needed but seems to help IntelliJ locate the native artifact.
             // srcDirs += preferredNativeFileDir
-            srcDirs += buildToTest.nativeResourcesDir(buildDir)
+            srcDirs += buildToTest.nativeResourcesDir()
         }
     }
 
     // Add the source sets for each of the native builds
     nativeBuilds.each { nativeBuild ->
-        String sourceSetName = nativeBuild.sourceSetName()
-        String nativeDir = nativeBuild.nativeResourcesDir(buildDir)
+        String sourceSetName = nativeBuild.classifier()
+        String nativeDir = nativeBuild.nativeResourcesDir()
 
         // Main sources for the native build
         "$sourceSetName" {
@@ -250,8 +256,7 @@ dependencies {
             project(path: ':conscrypt-testing', configuration: 'shadow'),
             libraries.junit,
             libraries.mockito,
-            sourceSets[buildToTest.sourceSetName()].output
-            // sourceSets["$preferredSourceSet"].output
+            sourceSets[buildToTest.classifier()].output
 
     platformCompileOnly sourceSets.main.output
     implementation 'org.codehaus.groovy:groovy-all:3.0.10'
@@ -262,13 +267,13 @@ nativeBuilds.each { nativeBuild ->
     addNativeJar(nativeBuild)
 
     // Build the classes as part of the standard build.
-    classes.dependsOn sourceSet(nativeBuild.classifier()).classesTaskName
+    classes.dependsOn sourceSets[nativeBuild.classifier()].classesTaskName
 }
 
 // Adds a JAR task for the native library.
 def addNativeJar(NativeBuildInfo nativeBuild) {
     // Create a JAR for this configuration and add it to the output archives.
-    SourceSet sourceSet = sourceSet(nativeBuild.classifier())
+    SourceSet sourceSet = sourceSets[nativeBuild.classifier()]
     def jarTask = tasks.register(sourceSet.jarTaskName, Jar) { Jar t ->
         // Depend on the regular classes task
         dependsOn classes
@@ -355,13 +360,8 @@ model {
                 // Build the JNI lib as a shared library.
                 withType (SharedLibraryBinarySpec) {
                     cppCompiler.define "CONSCRYPT_OPENJDK"
-
-                    def targetOS = targetPlatform.operatingSystem.name
-                    def targetArch = targetPlatform.architecture.name.replaceAll("-", "_")
-                    def nativeBuild = NativeBuildInfo.find(targetOS, targetArch)
-                    assert nativeBuild != null : "Unknown native build"
-                    String libDir = nativeBuild.libDir()
-                    String libPath = "$boringsslHome/$libDir"
+                    def buildInfo = buildInfo(targetPlatform)
+                    String libPath = "$boringsslHome/${buildInfo.libDir()}"
 
                     if (toolChain in Clang || toolChain in Gcc) {
                         cppCompiler.args "-Wall",
@@ -399,7 +399,7 @@ model {
                         cppCompiler.define "DLL_EXPORT"
                         cppCompiler.define "WIN32_LEAN_AND_MEAN"
                         cppCompiler.define "NOMINMAX"
-                        if (nativeBuild.is64bit()) {
+                        if (buildInfo.is64bit()) {
                             cppCompiler.define "WIN64"
                         }
                         cppCompiler.define "_WINDOWS"
@@ -453,20 +453,18 @@ model {
 
     tasks { t ->
         $.binaries.withType(SharedLibraryBinarySpec).each { binary ->
-            // Build the native artifact classifier from the OS and architecture.
-            def archName = binary.targetPlatform.architecture.name.replaceAll('-', '_')
-            def classifier = classifierFor(osName, archName)
-            def sourceSetName = sourceSetName("$classifier")
+            def buildInfo = buildInfo(binary.targetPlatform)
+            def classifier = buildInfo.classifier()
             def source = binary.sharedLibraryFile
 
             // Copies the native library to a resource location that will be included in the jar.
-            def copyTask = project.tasks.register("copyNativeLib${sourceSetName}", Copy) {
+            def copyTask = project.tasks.register("copyNativeLib${classifier}", Copy) {
                 dependsOn binary.tasks.link
                 from source
                 // Rename the artifact to include the generated classifier
                 rename '(.+)(\\.[^\\.]+)', "\$1-$classifier\$2"
                 // Everything under will be included in the native jar.
-                into nativeResourcesDir(classifier) + '/META-INF/native'
+                into buildInfo.nativeResourcesDir() + '/META-INF/native'
             }
 
             // Now define a task to strip the release binary (linux only)
@@ -500,22 +498,5 @@ boolean isExecutableOnPath(executable) {
         }
     }
     return false;
-}
-
-String nativeResourcesDir(nativeClassifier) {
-    def sourceSetName = sourceSetName(nativeClassifier)
-    "${buildDir}/${sourceSetName}/native-resources"
-}
-
-SourceSet sourceSet(classifier) {
-    sourceSets[sourceSetName(classifier)]
-}
-
-static String classifierFor(osName, archName) {
-    "${osName}-${archName}"
-}
-
-static String sourceSetName(classifier) {
-    classifier.replaceAll("-", "_")
 }
 
